@@ -1,124 +1,42 @@
 package main
 
 import (
-	"net/http"
-	"sync/atomic"
+	"websocket-chat/pkg/room"
 
 	log "github.com/mgutz/logxi/v1"
-
-	"github.com/gorilla/websocket"
 )
 
 var (
-	upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-	}
+	// TODO: don't use global vars
+	DefaultRoom = room.New(0)
 )
-
-type Message struct {
-	Type   int
-	Data   []byte
-	Sender int
-}
 
 /*
 in1  \              / out1
 in2  -->  fanIn  -->  out2
 in3  /              \ out3
 */
-
-func fanIn(msgs <-chan Message, consumers []chan Message) {
-	for msg := range msgs {
-		log.Info("fanIn", "msg", msg.Data, "cc", len(consumers))
-		for i, out := range consumers {
-			if msg.Sender == i {
-				continue
-			}
-			if out == nil {
+func fanIn(r *room.Room) {
+	for msg := range r.Messages() {
+		ss := r.Subscribers()
+		log.Info("fanIn", "msg", msg.Data, "ss", len(ss))
+		for _, s := range ss {
+			if msg.Sender == s.Id {
 				continue
 			}
 			log.Info("fanIn write to consumer")
-			out <- msg
+			s.Messages <- msg
 		}
 	}
-}
-
-func reader(id int, conn *websocket.Conn, out chan<- Message) {
-	for {
-		t, msg, err := conn.ReadMessage()
-		if err != nil {
-			if t == websocket.CloseMessage {
-				return
-			}
-			log.Error("error on read msg", "err", err)
-			return
-		}
-		log.Info("read", "msg", msg)
-		out <- Message{t, msg, id}
-	}
-}
-
-var (
-	defaultRoom = newRoom(10)
-)
-
-type room struct {
-	msgs   chan Message
-	actors []chan Message
-
-	id int64
-}
-
-func newRoom(capacity int) *room {
-	return &room{
-		actors: make([]chan Message, capacity),
-		msgs:   make(chan Message),
-	}
-}
-
-func (r *room) add(conn *websocket.Conn) {
-	out := make(chan Message)
-	ind := atomic.LoadInt64(&r.id)
-	r.actors[ind] = out
-	atomic.AddInt64(&r.id, 1)
-	go func() {
-		defer conn.Close()
-		// TODO: remove from consumers
-
-		reader(int(ind), conn, r.msgs)
-	}()
-	go writer(conn, out)
-}
-
-func writer(conn *websocket.Conn, msgs <-chan Message) {
-	for m := range msgs {
-		if err := conn.WriteMessage(m.Type, m.Data); err != nil {
-			log.Error("error on write", "err", err)
-		}
-	}
-}
-
-func handler(w http.ResponseWriter, r *http.Request) {
-	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
-
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Error("error on upgrade connection", "err", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	defaultRoom.add(ws)
 }
 
 func main() {
-	go fanIn(defaultRoom.msgs, defaultRoom.actors)
-	http.HandleFunc("/", handler)
-
+	go fanIn(DefaultRoom)
 	h := ":8080"
+	web := NewServer(h)
+
 	log.Info("starting web server", "host", h)
-	if err := http.ListenAndServe(h, nil); err != nil {
+	if err := web.ListenAndServe(); err != nil {
 		log.Fatal(err.Error())
 	}
 }
