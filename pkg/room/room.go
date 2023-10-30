@@ -16,20 +16,22 @@ type Message struct {
 }
 
 type Client struct {
-	Id       uuid.UUID
-	Messages chan Message
+	Id          uuid.UUID
+	Messages    chan Message
+	IsConnected bool
 }
 
 type Room struct {
 	msgs chan Message
 
-	mu     sync.RWMutex
-	actors []*Client
+	mu      sync.RWMutex
+	actors  map[int]*Client
+	monoInd int
 }
 
 func New(capacity int) *Room {
 	return &Room{
-		actors: make([]*Client, 0, capacity),
+		actors: make(map[int]*Client, capacity),
 		msgs:   make(chan Message),
 	}
 }
@@ -41,28 +43,36 @@ func (r *Room) Messages() chan Message {
 func (r *Room) Subscribers() []*Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	var cc []*Client
+	for _, c := range r.actors {
+		if c.IsConnected {
+			cc = append(cc, c)
+		}
+	}
 
-	return r.actors
+	return cc
 }
 
 func (r *Room) AddClient(conn *websocket.Conn) {
 	done := make(chan struct{})
 	c := &Client{
-		Id:       uuid.NewV4(),
-		Messages: make(chan Message),
+		Id:          uuid.NewV4(),
+		Messages:    make(chan Message),
+		IsConnected: true,
 	}
 
+	userInd := 0
 	r.mu.Lock()
-	r.actors = append(r.actors, c)
-	ind := len(r.actors) - 1
+	r.actors[r.monoInd] = c
+	userInd = r.monoInd
+	r.monoInd++
 	r.mu.Unlock()
 
 	go func() {
-		i := ind
 		defer conn.Close()
 		defer func() {
 			done <- struct{}{}
-			r.removeSub(i)
+			r.removeSub(userInd)
 		}()
 
 		reader(c.Id, conn, r.msgs)
@@ -73,12 +83,7 @@ func (r *Room) AddClient(conn *websocket.Conn) {
 func (r *Room) removeSub(ind int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	n := len(r.actors)
-	if n == 0 {
-		return
-	}
-	r.actors[ind] = r.actors[n-1]
-	r.actors = r.actors[:n-1]
+	r.actors[ind].IsConnected = false
 }
 
 func writer(conn *websocket.Conn, client *Client, done <-chan struct{}) {
